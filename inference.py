@@ -1,34 +1,65 @@
 import bisect
 import os
+import os.path
+import sys
 from tqdm import tqdm
 import torch
 import numpy as np
 import cv2
 
+sys.path.append(os.getenv("PYTHONPATH_FILM")) 
+
 from util import load_image
 
-
-def inference(model_path, img1, img2, save_path, gpu, inter_frames, fps, half):
-    model = torch.jit.load(model_path, map_location='cpu')
+def getModel(modelPath, gpu, half):
+    model = torch.jit.load(modelPath, map_location='cpu')
     model.eval()
-    img_batch_1, crop_region_1 = load_image(img1)
-    img_batch_2, crop_region_2 = load_image(img2)
-
-    img_batch_1 = torch.from_numpy(img_batch_1).permute(0, 3, 1, 2)
-    img_batch_2 = torch.from_numpy(img_batch_2).permute(0, 3, 1, 2)
-
-    if not half:
+    
+    if not half:    
         model.float()
-
+            
     if gpu and torch.cuda.is_available():
+        print("Using GPU for frame interpolation...\n")
         if half:
             model = model.half()
         else:
             model.float()
         model = model.cuda()
+    else:
+        print("Using CPU for frame interpolation...\n")
+        
+    return model
+        
 
-    if save_path == 'img1 folder':
-        save_path = os.path.join(os.path.split(img1)[0], 'output.mp4')
+def padNum(num):
+    neg = num < 0
+    
+    if (num < 0):
+        num = -num
+        
+    numStr = str(num)
+    if (len(numStr) == 4):
+        numStr = "0" + numStr
+    elif (len(numStr) == 3):
+        numStr = "00" + numStr
+    elif (len(numStr) == 2):
+        numStr = "000" + numStr
+    elif (len(numStr) == 1):
+        numStr = "0000" + numStr
+        
+    if (neg):
+        numStr = "-" + numStr
+        
+    return numStr
+    
+def interpTwoFramesFILM(model, gpu, half, img1, img2, inter_frames, save_num, save_name, save_path):
+        
+    newFrames = []
+    img_batch_1, crop_region_1 = load_image(img1)
+    img_batch_2, crop_region_2 = load_image(img2)
+
+    img_batch_1 = torch.from_numpy(img_batch_1).permute(0, 3, 1, 2)
+    img_batch_2 = torch.from_numpy(img_batch_2).permute(0, 3, 1, 2)
 
     results = [
         img_batch_1,
@@ -39,8 +70,9 @@ def inference(model_path, img1, img2, save_path, gpu, inter_frames, fps, half):
     remains = list(range(1, inter_frames + 1))
 
     splits = torch.linspace(0, 1, inter_frames + 2)
-
-    for _ in tqdm(range(len(remains)), 'Generating in-between frames'):
+    
+            
+    for _ in range(len(remains)):
         starts = splits[idxes[:-1]]
         ends = splits[idxes[1:]]
         distances = ((splits[None, remains] - starts[:, None]) / (ends[:, None] - starts[:, None]) - .5).abs()
@@ -66,40 +98,24 @@ def inference(model_path, img1, img2, save_path, gpu, inter_frames, fps, half):
         idxes.insert(insert_position, remains[step])
         results.insert(insert_position, prediction.clamp(0, 1).cpu().float())
         del remains[step]
-
-    video_folder = os.path.split(save_path)[0]
-    os.makedirs(video_folder, exist_ok=True)
-
+    
     y1, x1, y2, x2 = crop_region_1
     frames = [(tensor[0] * 255).byte().flip(0).permute(1, 2, 0).numpy()[y1:y2, x1:x2].copy() for tensor in results]
 
+    
     w, h = frames[0].shape[1::-1]
-    fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
-    writer = cv2.VideoWriter(save_path, fourcc, fps, (w, h))
-    for frame in frames:
-        writer.write(frame)
+    
+    for frame in frames:        
+        framePath = save_path + save_name + padNum(save_num) + ".png"                        
+        cv2.imwrite(framePath, frame)
+        newFrames.append(framePath)
+        save_num += 1
+        
+    return newFrames
 
-    for frame in frames[1:][::-1]:
-        writer.write(frame)
-
-    writer.release()
 
 
 if __name__ == '__main__':
+    
     import argparse
 
-    parser = argparse.ArgumentParser(description='Test frame interpolator model')
-
-    parser.add_argument('model_path', type=str, help='Path to the TorchScript model')
-    parser.add_argument('img1', type=str, help='Path to the first image')
-    parser.add_argument('img2', type=str, help='Path to the second image')
-
-    parser.add_argument('--save_path', type=str, default='img1 folder', help='Path to save the interpolated frames')
-    parser.add_argument('--gpu', action='store_true', help='Use GPU')
-    parser.add_argument('--fp16', action='store_true', help='Use FP16')
-    parser.add_argument('--frames', type=int, default=18, help='Number of frames to interpolate')
-    parser.add_argument('--fps', type=int, default=10, help='FPS of the output video')
-
-    args = parser.parse_args()
-
-    inference(args.model_path, args.img1, args.img2, args.save_path, args.gpu, args.frames, args.fps, args.fp16)
